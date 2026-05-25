@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { cleanText, jsonError, positiveInt, requireSpaceId } from "@/lib/api";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { updateReward } from "@/lib/store";
 
 type Params = { params: { id: string } };
 
@@ -8,7 +8,7 @@ export async function PATCH(request: Request, { params }: Params) {
   const auth = requireSpaceId();
   if ("error" in auth) return auth.error;
   const body = await request.json().catch(() => ({}));
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  const updates: Record<string, unknown> = {};
 
   if ("title" in body) {
     const title = cleanText(body.title, 80);
@@ -23,14 +23,9 @@ export async function PATCH(request: Request, { params }: Params) {
   }
   if ("is_active" in body) updates.is_active = Boolean(body.is_active);
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("rewards")
-    .update(updates)
-    .eq("id", params.id)
-    .eq("space_id", auth.spaceId)
-    .select("*")
-    .single();
-
-  if (error) return jsonError(error.message, 400);
-  return NextResponse.json(data);
+  try {
+    return NextResponse.json(await updateReward(auth.spaceId, params.id, updates));
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "更新奖励失败", 400);
+  }
 }

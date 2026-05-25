@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { cleanText, jsonError, positiveInt, requireSpaceId } from "@/lib/api";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { updateTask } from "@/lib/store";
 import type { Cycle } from "@/lib/types";
 
 const cycles = new Set(["daily", "weekly", "none"]);
@@ -11,7 +11,7 @@ export async function PATCH(request: Request, { params }: Params) {
   const auth = requireSpaceId();
   if ("error" in auth) return auth.error;
   const body = await request.json().catch(() => ({}));
-  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  const updates: Record<string, unknown> = {};
 
   if ("title" in body) {
     const title = cleanText(body.title, 80);
@@ -30,14 +30,9 @@ export async function PATCH(request: Request, { params }: Params) {
   }
   if ("is_active" in body) updates.is_active = Boolean(body.is_active);
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("tasks")
-    .update(updates)
-    .eq("id", params.id)
-    .eq("space_id", auth.spaceId)
-    .select("*")
-    .single();
-
-  if (error) return jsonError(error.message, 400);
-  return NextResponse.json(data);
+  try {
+    return NextResponse.json(await updateTask(auth.spaceId, params.id, updates));
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "更新任务失败", 400);
+  }
 }

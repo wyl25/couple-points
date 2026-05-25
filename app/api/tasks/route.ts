@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { cleanText, jsonError, positiveInt, requireSpaceId } from "@/lib/api";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { createTask } from "@/lib/store";
 import type { Cycle } from "@/lib/types";
 
 const cycles = new Set(["daily", "weekly", "none"]);
@@ -16,12 +16,9 @@ export async function POST(request: Request) {
   if (!title) return jsonError("请输入任务名称。");
   if (!points) return jsonError("任务积分必须是正整数。");
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("tasks")
-    .insert({ space_id: auth.spaceId, title, description, points, cycle })
-    .select("*")
-    .single();
-
-  if (error) return jsonError(error.message, 400);
-  return NextResponse.json(data);
+  try {
+    return NextResponse.json(await createTask(auth.spaceId, { title, description, points, cycle }));
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "创建任务失败", 400);
+  }
 }

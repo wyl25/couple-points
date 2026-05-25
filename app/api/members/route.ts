@@ -1,6 +1,6 @@
 ﻿import { NextResponse } from "next/server";
 import { cleanText, jsonError, requireSpaceId } from "@/lib/api";
-import { getSupabaseAdmin } from "@/lib/supabase";
+import { createMember } from "@/lib/store";
 
 export async function POST(request: Request) {
   const auth = requireSpaceId();
@@ -9,12 +9,9 @@ export async function POST(request: Request) {
   const name = cleanText(body.name, 40);
   if (!name) return jsonError("请输入成员昵称。");
 
-  const { data, error } = await getSupabaseAdmin()
-    .from("members")
-    .insert({ space_id: auth.spaceId, name })
-    .select("*")
-    .single();
-
-  if (error) return jsonError(error.code === "23505" ? "这个昵称已经存在。" : error.message, 400);
-  return NextResponse.json(data);
+  try {
+    return NextResponse.json(await createMember(auth.spaceId, name));
+  } catch (error) {
+    return jsonError(error instanceof Error ? error.message : "创建成员失败", 400);
+  }
 }
