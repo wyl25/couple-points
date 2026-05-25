@@ -2,6 +2,16 @@
 
 国内可访问版情侣/小团队积分系统。前端使用 Next.js，后端 API 使用腾讯云 CloudBase 云数据库。
 
+## 功能
+
+- 成员独立任务库：每个任务只属于一个成员。
+- Apple Health 风格首页：今日完成圆环、连续完成天数、7 天积分趋势。
+- 每日任务每天最多完成一次，重复点击不会重复加分。
+- 每日任务支持自定义未完成扣分。
+- 手动结算昨日：检查昨日未完成每日任务并扣分，且同一天不会重复结算。
+- 积分事件流水：任务加分、每日扣分、奖励兑换扣分都有记录。
+- 奖励兑换仍采用提交后确认的流程。
+
 ## 本地开发
 
 ```bash
@@ -45,6 +55,8 @@ npm run seed:cloudbase
 - `couple_points_task_completions`
 - `couple_points_rewards`
 - `couple_points_reward_redemptions`
+- `couple_points_point_events`
+- `couple_points_daily_settlements`
 
 ## 部署
 

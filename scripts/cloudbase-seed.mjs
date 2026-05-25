@@ -14,7 +14,9 @@ const collections = [
   "couple_points_tasks",
   "couple_points_task_completions",
   "couple_points_rewards",
-  "couple_points_reward_redemptions"
+  "couple_points_reward_redemptions",
+  "couple_points_point_events",
+  "couple_points_daily_settlements"
 ];
 
 const app = tcb.init({

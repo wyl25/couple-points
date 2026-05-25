@@ -24,6 +24,16 @@ export async function PATCH(request: Request, { params }: Params) {
     if (!points) return jsonError("任务积分必须是正整数。");
     updates.points = points;
   }
+  if ("penalty_points" in body) {
+    const penaltyPoints = Number(body.penalty_points);
+    if (!Number.isInteger(penaltyPoints) || penaltyPoints < 0) return jsonError("扣分必须是 0 或正整数。");
+    updates.penalty_points = penaltyPoints;
+  }
+  if ("memberId" in body) {
+    const memberId = typeof body.memberId === "string" ? body.memberId : "";
+    if (!memberId) return jsonError("请选择任务所属成员。");
+    updates.member_id = memberId;
+  }
   if ("cycle" in body) {
     if (!cycles.has(body.cycle)) return jsonError("任务周期无效。");
     updates.cycle = body.cycle as Cycle;

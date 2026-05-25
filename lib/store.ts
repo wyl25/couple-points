@@ -1,9 +1,22 @@
 import { randomUUID } from "node:crypto";
 import tcb from "@cloudbase/node-sdk";
-import type { Cycle, Member, Reward, RewardRedemption, Space, Task, TaskCompletion } from "@/lib/types";
+import type {
+  Cycle,
+  DailySettlement,
+  DailySettlementResult,
+  Member,
+  MemberStats,
+  PointEvent,
+  PointEventType,
+  Reward,
+  RewardRedemption,
+  Space,
+  Task,
+  TaskCompletion
+} from "@/lib/types";
 
-type CreateTaskInput = Pick<Task, "title" | "description" | "points" | "cycle">;
-type UpdateTaskInput = Partial<Pick<Task, "title" | "description" | "points" | "cycle" | "is_active">>;
+type CreateTaskInput = Pick<Task, "member_id" | "title" | "description" | "points" | "penalty_points" | "cycle">;
+type UpdateTaskInput = Partial<Pick<Task, "member_id" | "title" | "description" | "points" | "penalty_points" | "cycle" | "is_active">>;
 type CreateRewardInput = Pick<Reward, "title" | "description" | "cost">;
 type UpdateRewardInput = Partial<Pick<Reward, "title" | "description" | "cost" | "is_active">>;
 
@@ -13,8 +26,12 @@ const names = {
   tasks: "couple_points_tasks",
   completions: "couple_points_task_completions",
   rewards: "couple_points_rewards",
-  redemptions: "couple_points_reward_redemptions"
+  redemptions: "couple_points_reward_redemptions",
+  pointEvents: "couple_points_point_events",
+  settlements: "couple_points_daily_settlements"
 };
+
+const dayMs = 24 * 60 * 60 * 1000;
 
 function requireEnv(name: string) {
   const value = process.env[name];
@@ -26,12 +43,20 @@ function now() {
   return new Date().toISOString();
 }
 
-function byNewest<T extends Record<string, unknown>>(field: keyof T) {
-  return (a: T, b: T) => String(b[field]).localeCompare(String(a[field]));
+function dateKey(offsetDays = 0) {
+  const date = new Date(Date.now() + offsetDays * dayMs);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(date);
 }
 
-function byOldest<T extends Record<string, unknown>>(field: keyof T) {
-  return (a: T, b: T) => String(a[field]).localeCompare(String(b[field]));
+function shiftDateKey(key: string, offsetDays: number) {
+  const [year, month, day] = key.split("-").map(Number);
+  const utc = Date.UTC(year, month - 1, day) + offsetDays * dayMs;
+  return new Date(utc).toISOString().slice(0, 10);
 }
 
 function withId<T>(data: T & { _id?: string; id?: string }) {
@@ -51,8 +76,7 @@ function getDb() {
 }
 
 async function getAll<T>(collectionName: string, where: Record<string, unknown> = {}) {
-  const db = getDb();
-  const result = await db.collection(collectionName).where(where).limit(1000).get();
+  const result = await getDb().collection(collectionName).where(where).limit(1000).get();
   return (result.data ?? []).map((item) => withId(item as T & { _id?: string; id?: string }));
 }
 
@@ -69,7 +93,105 @@ async function setDoc<T extends { id: string }>(collectionName: string, data: T)
 async function updateDoc<T>(collectionName: string, id: string, updates: Partial<T>) {
   await getDb().collection(collectionName).doc(id).update(updates);
   const updated = await getDb().collection(collectionName).doc(id).get();
-  return withId((updated.data?.[0] ?? updates) as T & { _id?: string; id?: string });
+  return withId((updated.data?.[0] ?? { id, ...updates }) as T & { _id?: string; id?: string });
+}
+
+async function addPointEvent(input: {
+  space_id: string;
+  member_id: string;
+  type: PointEventType;
+  amount: number;
+  reason: string;
+  task_id?: string | null;
+  reward_id?: string | null;
+  redemption_id?: string | null;
+  date_key?: string;
+}) {
+  return setDoc<PointEvent>(names.pointEvents, {
+    id: randomUUID(),
+    date_key: input.date_key ?? dateKey(),
+    created_at: now(),
+    task_id: null,
+    reward_id: null,
+    redemption_id: null,
+    ...input
+  });
+}
+
+function attachCompletionRefs(item: TaskCompletion, tasks: Map<string, Task>, members: Map<string, Member>) {
+  const task = tasks.get(item.task_id);
+  const member = members.get(item.member_id);
+  return {
+    ...item,
+    tasks: task ? { title: task.title, cycle: task.cycle } : null,
+    members: member ? { name: member.name } : null
+  };
+}
+
+function attachRedemptionRefs(item: RewardRedemption, rewards: Map<string, Reward>, members: Map<string, Member>) {
+  const reward = rewards.get(item.reward_id);
+  const member = members.get(item.member_id);
+  return {
+    ...item,
+    rewards: reward ? { title: reward.title } : null,
+    members: member ? { name: member.name } : null
+  };
+}
+
+function buildStats(
+  members: Member[],
+  tasks: Task[],
+  completions: TaskCompletion[],
+  settlements: DailySettlement[],
+  pointEvents: PointEvent[]
+) {
+  const today = dateKey();
+  const yesterday = dateKey(-1);
+  const stats: Record<string, MemberStats> = {};
+
+  for (const member of members) {
+    const dailyTasks = tasks.filter((task) => task.member_id === member.id && task.is_active && task.cycle === "daily");
+    const todayCompletedTaskIds = new Set(
+      completions
+        .filter((item) => item.member_id === member.id && item.date_key === today)
+        .map((item) => item.task_id)
+    );
+
+    let streak = 0;
+    for (let i = 0; i < 365; i += 1) {
+      const key = shiftDateKey(today, -i);
+      if (dailyTasks.length === 0) break;
+      const completedIds = new Set(
+        completions
+          .filter((item) => item.member_id === member.id && item.date_key === key)
+          .map((item) => item.task_id)
+      );
+      if (dailyTasks.every((task) => completedIds.has(task.id))) streak += 1;
+      else break;
+    }
+
+    const trend = Array.from({ length: 7 }, (_, index) => {
+      const key = shiftDateKey(today, index - 6);
+      const amount = pointEvents
+        .filter((event) => event.member_id === member.id && event.date_key === key)
+        .reduce((sum, event) => sum + event.amount, 0);
+      return { date_key: key, amount };
+    });
+
+    stats[member.id] = {
+      member_id: member.id,
+      today_total: dailyTasks.length,
+      today_completed: dailyTasks.filter((task) => todayCompletedTaskIds.has(task.id)).length,
+      today_rate: dailyTasks.length === 0 ? 1 : todayCompletedTaskIds.size / dailyTasks.length,
+      streak_days: streak,
+      yesterday_settled: settlements.some((item) => item.member_id === member.id && item.date_key === yesterday),
+      yesterday_date_key: yesterday,
+      today_date_key: today,
+      trend
+    };
+  }
+
+  return stats;
 }
 
 export async function findSpaceByInviteHash(invite_hash: string) {
@@ -77,13 +199,15 @@ export async function findSpaceByInviteHash(invite_hash: string) {
 }
 
 export async function getBootstrap(spaceId: string) {
-  const [space, members, tasks, completions, rewards, redemptions] = await Promise.all([
+  const [space, members, tasks, completions, rewards, redemptions, pointEvents, settlements] = await Promise.all([
     getOne<Space>(names.spaces, { id: spaceId }),
     getAll<Member>(names.members, { space_id: spaceId }),
     getAll<Task>(names.tasks, { space_id: spaceId }),
     getAll<TaskCompletion>(names.completions, { space_id: spaceId }),
     getAll<Reward>(names.rewards, { space_id: spaceId }),
-    getAll<RewardRedemption>(names.redemptions, { space_id: spaceId })
+    getAll<RewardRedemption>(names.redemptions, { space_id: spaceId }),
+    getAll<PointEvent>(names.pointEvents, { space_id: spaceId }),
+    getAll<DailySettlement>(names.settlements, { space_id: spaceId })
   ]);
 
   if (!space) throw new Error("空间不存在。");
@@ -97,22 +221,17 @@ export async function getBootstrap(spaceId: string) {
     members: members.sort((a, b) => b.points - a.points || a.created_at.localeCompare(b.created_at)),
     tasks: tasks.sort((a, b) => Number(b.is_active) - Number(a.is_active) || b.created_at.localeCompare(a.created_at)),
     completions: completions
-      .sort(byNewest<TaskCompletion>("completed_at"))
-      .slice(0, 40)
-      .map((item) => ({
-        ...item,
-        tasks: taskById.get(item.task_id) ? { title: taskById.get(item.task_id)!.title, cycle: taskById.get(item.task_id)!.cycle } : null,
-        members: memberById.get(item.member_id) ? { name: memberById.get(item.member_id)!.name } : null
-      })),
+      .sort((a, b) => b.completed_at.localeCompare(a.completed_at))
+      .slice(0, 120)
+      .map((item) => attachCompletionRefs(item, taskById, memberById)),
     rewards: rewards.sort((a, b) => Number(b.is_active) - Number(a.is_active) || b.created_at.localeCompare(a.created_at)),
     redemptions: redemptions
-      .sort(byNewest<RewardRedemption>("requested_at"))
-      .slice(0, 40)
-      .map((item) => ({
-        ...item,
-        rewards: rewardById.get(item.reward_id) ? { title: rewardById.get(item.reward_id)!.title } : null,
-        members: memberById.get(item.member_id) ? { name: memberById.get(item.member_id)!.name } : null
-      }))
+      .sort((a, b) => b.requested_at.localeCompare(a.requested_at))
+      .slice(0, 80)
+      .map((item) => attachRedemptionRefs(item, rewardById, memberById)),
+    pointEvents: pointEvents.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 120),
+    settlements: settlements.sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, 120),
+    stats: buildStats(members, tasks, completions, settlements, pointEvents)
   };
 }
 
@@ -130,10 +249,15 @@ export async function createMember(spaceId: string, name: string) {
 }
 
 export async function createTask(spaceId: string, input: CreateTaskInput) {
+  const member = await getOne<Member>(names.members, { id: input.member_id, space_id: spaceId });
+  if (!member) throw new Error("成员不存在。");
+
   return setDoc<Task>(names.tasks, {
     id: randomUUID(),
     space_id: spaceId,
     ...input,
+    penalty_points: input.cycle === "daily" ? input.penalty_points : 0,
+    daily_once: input.cycle === "daily",
     is_active: true,
     created_at: now(),
     updated_at: now()
@@ -143,16 +267,39 @@ export async function createTask(spaceId: string, input: CreateTaskInput) {
 export async function updateTask(spaceId: string, taskId: string, updates: UpdateTaskInput) {
   const task = await getOne<Task>(names.tasks, { id: taskId, space_id: spaceId });
   if (!task) throw new Error("任务不存在。");
-  return updateDoc<Task>(names.tasks, taskId, { ...updates, updated_at: now() } as Partial<Task>);
+  const nextCycle = updates.cycle ?? task.cycle;
+  return updateDoc<Task>(names.tasks, taskId, {
+    ...updates,
+    penalty_points: nextCycle === "daily" ? updates.penalty_points ?? task.penalty_points : 0,
+    daily_once: nextCycle === "daily",
+    updated_at: now()
+  } as Partial<Task>);
 }
 
 export async function completeTask(spaceId: string, taskId: string, memberId: string) {
   const [task, member] = await Promise.all([
-    getOne<Task>(names.tasks, { id: taskId, space_id: spaceId }),
+    getOne<Task>(names.tasks, { id: taskId, space_id: spaceId, member_id: memberId }),
     getOne<Member>(names.members, { id: memberId, space_id: spaceId })
   ]);
   if (!task || !task.is_active) throw new Error("任务不存在或已停用。");
   if (!member || !member.is_active) throw new Error("成员不存在或已停用。");
+
+  const key = dateKey();
+  if (task.cycle === "daily") {
+    const existing = await getOne<TaskCompletion>(names.completions, {
+      space_id: spaceId,
+      task_id: task.id,
+      member_id: member.id,
+      date_key: key
+    });
+    if (existing) {
+      return {
+        completion: { ...existing, tasks: { title: task.title, cycle: task.cycle }, members: { name: member.name } },
+        member,
+        alreadyCompleted: true
+      };
+    }
+  }
 
   const completion = await setDoc<TaskCompletion>(names.completions, {
     id: randomUUID(),
@@ -160,12 +307,77 @@ export async function completeTask(spaceId: string, taskId: string, memberId: st
     task_id: task.id,
     member_id: member.id,
     points: task.points,
+    date_key: key,
     completed_at: now(),
     tasks: { title: task.title, cycle: task.cycle },
     members: { name: member.name }
   });
+  await addPointEvent({
+    space_id: spaceId,
+    member_id: member.id,
+    type: "task_complete",
+    amount: task.points,
+    reason: `完成任务：${task.title}`,
+    task_id: task.id,
+    date_key: key
+  });
   const updatedMember = await updateDoc<Member>(names.members, member.id, { points: member.points + task.points } as Partial<Member>);
-  return { completion, member: updatedMember };
+  return { completion, member: updatedMember, alreadyCompleted: false };
+}
+
+export async function settleDaily(spaceId: string, memberId: string, targetDateKey = dateKey(-1)): Promise<DailySettlementResult> {
+  const [member, existing] = await Promise.all([
+    getOne<Member>(names.members, { id: memberId, space_id: spaceId }),
+    getOne<DailySettlement>(names.settlements, { space_id: spaceId, member_id: memberId, date_key: targetDateKey })
+  ]);
+  if (!member) throw new Error("成员不存在。");
+  if (existing) throw new Error("这一天已经结算过，不能重复扣分。");
+
+  const [tasks, completions] = await Promise.all([
+    getAll<Task>(names.tasks, { space_id: spaceId, member_id: memberId }),
+    getAll<TaskCompletion>(names.completions, { space_id: spaceId, member_id: memberId, date_key: targetDateKey })
+  ]);
+  const dailyTasks = tasks.filter((task) => task.is_active && task.cycle === "daily");
+  const completedIds = new Set(completions.map((item) => item.task_id));
+  const completed = dailyTasks.filter((task) => completedIds.has(task.id));
+  const missed = dailyTasks.filter((task) => !completedIds.has(task.id));
+  const penaltyTotal = missed.reduce((sum, task) => sum + Math.max(0, task.penalty_points), 0);
+
+  const settlement = await setDoc<DailySettlement>(names.settlements, {
+    id: randomUUID(),
+    space_id: spaceId,
+    member_id: memberId,
+    date_key: targetDateKey,
+    penalty_total: penaltyTotal,
+    completed_task_ids: completed.map((task) => task.id),
+    missed_task_ids: missed.map((task) => task.id),
+    created_at: now()
+  });
+
+  for (const task of missed) {
+    if (task.penalty_points > 0) {
+      await addPointEvent({
+        space_id: spaceId,
+        member_id: memberId,
+        type: "daily_penalty",
+        amount: -task.penalty_points,
+        reason: `未完成每日任务：${task.title}`,
+        task_id: task.id,
+        date_key: targetDateKey
+      });
+    }
+  }
+
+  const updatedMember = penaltyTotal > 0
+    ? await updateDoc<Member>(names.members, member.id, { points: member.points - penaltyTotal } as Partial<Member>)
+    : member;
+
+  return {
+    settlement,
+    member: updatedMember,
+    completed: completed.map((task) => ({ id: task.id, title: task.title, points: task.points })),
+    missed: missed.map((task) => ({ id: task.id, title: task.title, penalty_points: task.penalty_points }))
+  };
 }
 
 export async function createReward(spaceId: string, input: CreateRewardInput) {
@@ -213,7 +425,10 @@ export async function approveRedemption(spaceId: string, redemptionId: string, r
   if (!redemption) throw new Error("兑换申请不存在。");
   if (redemption.status !== "pending") throw new Error("这个兑换申请已经处理过。");
 
-  const member = await getOne<Member>(names.members, { id: redemption.member_id, space_id: spaceId });
+  const [member, reward] = await Promise.all([
+    getOne<Member>(names.members, { id: redemption.member_id, space_id: spaceId }),
+    getOne<Reward>(names.rewards, { id: redemption.reward_id, space_id: spaceId })
+  ]);
   if (!member) throw new Error("成员不存在。");
   if (member.points < redemption.cost) throw new Error("积分不足，无法确认兑换。");
 
@@ -223,7 +438,16 @@ export async function approveRedemption(spaceId: string, redemptionId: string, r
       resolved_at: now(),
       resolved_by_member_id: resolvedByMemberId
     } as Partial<RewardRedemption>),
-    updateDoc<Member>(names.members, member.id, { points: member.points - redemption.cost } as Partial<Member>)
+    updateDoc<Member>(names.members, member.id, { points: member.points - redemption.cost } as Partial<Member>),
+    addPointEvent({
+      space_id: spaceId,
+      member_id: member.id,
+      type: "reward_approved",
+      amount: -redemption.cost,
+      reason: `兑换奖励：${reward?.title ?? "奖励"}`,
+      reward_id: redemption.reward_id,
+      redemption_id: redemption.id
+    })
   ]);
 
   return { redemption: updatedRedemption, member: updatedMember };
