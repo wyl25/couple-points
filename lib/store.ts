@@ -90,6 +90,19 @@ async function setDoc<T extends { id: string }>(collectionName: string, data: T)
   return data;
 }
 
+export async function ensureCloudBaseCollections() {
+  const db = getDb();
+  await Promise.all(
+    Object.values(names).map(async (collectionName) => {
+      try {
+        await db.createCollection(collectionName);
+      } catch {
+        // CloudBase throws when the collection already exists.
+      }
+    })
+  );
+}
+
 async function updateDoc<T>(collectionName: string, id: string, updates: Partial<T>) {
   await getDb().collection(collectionName).doc(id).update(updates);
   const updated = await getDb().collection(collectionName).doc(id).get();
