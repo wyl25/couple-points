@@ -22,7 +22,7 @@ npm run dev
 默认邀请码：
 
 ```text
-love-0525
+
 ```
 
 ## CloudBase 配置
