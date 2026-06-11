@@ -102,7 +102,15 @@ export type MemberStats = {
   streak_days: number;
   yesterday_settled: boolean;
   yesterday_date_key: string;
+  settlement_date_key: string;
+  settlement_date_settled: boolean;
   today_date_key: string;
+  checkin_dates: Array<{
+    date_key: string;
+    offset_days: number;
+    completed: number;
+    total: number;
+  }>;
   trend: Array<{ date_key: string; amount: number }>;
 };
 

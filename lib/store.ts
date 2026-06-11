@@ -32,6 +32,7 @@ const names = {
 };
 
 const dayMs = 24 * 60 * 60 * 1000;
+const retroactiveDays = 3;
 
 function requireEnv(name: string) {
   const value = process.env[name];
@@ -57,6 +58,14 @@ function shiftDateKey(key: string, offsetDays: number) {
   const [year, month, day] = key.split("-").map(Number);
   const utc = Date.UTC(year, month - 1, day) + offsetDays * dayMs;
   return new Date(utc).toISOString().slice(0, 10);
+}
+
+function isDateKey(value: string) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+}
+
+function dayDifference(from: string, to: string) {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / dayMs);
 }
 
 function withId<T>(data: T & { _id?: string; id?: string }) {
@@ -160,6 +169,7 @@ function buildStats(
 ) {
   const today = dateKey();
   const yesterday = dateKey(-1);
+  const settlementDate = dateKey(-(retroactiveDays + 1));
   const stats: Record<string, MemberStats> = {};
 
   for (const member of members) {
@@ -191,6 +201,21 @@ function buildStats(
       return { date_key: key, amount };
     });
 
+    const checkinDates = Array.from({ length: retroactiveDays + 1 }, (_, offsetDays) => {
+      const key = shiftDateKey(today, -offsetDays);
+      const completedIds = new Set(
+        completions
+          .filter((item) => item.member_id === member.id && item.date_key === key)
+          .map((item) => item.task_id)
+      );
+      return {
+        date_key: key,
+        offset_days: offsetDays,
+        completed: dailyTasks.filter((task) => completedIds.has(task.id)).length,
+        total: dailyTasks.length
+      };
+    });
+
     stats[member.id] = {
       member_id: member.id,
       today_total: dailyTasks.length,
@@ -199,7 +224,10 @@ function buildStats(
       streak_days: streak,
       yesterday_settled: settlements.some((item) => item.member_id === member.id && item.date_key === yesterday),
       yesterday_date_key: yesterday,
+      settlement_date_key: settlementDate,
+      settlement_date_settled: settlements.some((item) => item.member_id === member.id && item.date_key === settlementDate),
       today_date_key: today,
+      checkin_dates: checkinDates,
       trend
     };
   }
@@ -289,7 +317,7 @@ export async function updateTask(spaceId: string, taskId: string, updates: Updat
   } as Partial<Task>);
 }
 
-export async function completeTask(spaceId: string, taskId: string, memberId: string) {
+export async function completeTask(spaceId: string, taskId: string, memberId: string, targetDateKey?: string) {
   const [task, member] = await Promise.all([
     getOne<Task>(names.tasks, { id: taskId, space_id: spaceId, member_id: memberId }),
     getOne<Member>(names.members, { id: memberId, space_id: spaceId })
@@ -297,8 +325,23 @@ export async function completeTask(spaceId: string, taskId: string, memberId: st
   if (!task || !task.is_active) throw new Error("任务不存在或已停用。");
   if (!member || !member.is_active) throw new Error("成员不存在或已停用。");
 
-  const key = dateKey();
+  const today = dateKey();
+  const key = targetDateKey ?? today;
+  if (!isDateKey(key)) throw new Error("日期格式不正确。");
+  const ageInDays = dayDifference(key, today);
+  if (task.cycle === "daily" && (ageInDays < 0 || ageInDays > retroactiveDays)) {
+    throw new Error(`每日任务只能补打卡今天及前 ${retroactiveDays} 天。`);
+  }
+  if (task.cycle !== "daily" && key !== today) {
+    throw new Error("每周和不限周期任务只能记录在今天。");
+  }
   if (task.cycle === "daily") {
+    const settlement = await getOne<DailySettlement>(names.settlements, {
+      space_id: spaceId,
+      member_id: member.id,
+      date_key: key
+    });
+    if (settlement) throw new Error("这一天已经结算，不能再补打卡。");
     const existing = await getOne<TaskCompletion>(names.completions, {
       space_id: spaceId,
       task_id: task.id,
@@ -338,7 +381,12 @@ export async function completeTask(spaceId: string, taskId: string, memberId: st
   return { completion, member: updatedMember, alreadyCompleted: false };
 }
 
-export async function settleDaily(spaceId: string, memberId: string, targetDateKey = dateKey(-1)): Promise<DailySettlementResult> {
+export async function settleDaily(spaceId: string, memberId: string, targetDateKey = dateKey(-(retroactiveDays + 1))): Promise<DailySettlementResult> {
+  if (!isDateKey(targetDateKey)) throw new Error("日期格式不正确。");
+  const ageInDays = dayDifference(targetDateKey, dateKey());
+  if (ageInDays <= retroactiveDays) {
+    throw new Error(`最近 ${retroactiveDays} 天仍可补打卡，暂时不能结算扣分。`);
+  }
   const [member, existing] = await Promise.all([
     getOne<Member>(names.members, { id: memberId, space_id: spaceId }),
     getOne<DailySettlement>(names.settlements, { space_id: spaceId, member_id: memberId, date_key: targetDateKey })

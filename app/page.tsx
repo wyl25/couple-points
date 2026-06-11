@@ -50,10 +50,17 @@ function shortDate(value: string) {
   return value.slice(5).replace("-", "/");
 }
 
+function checkinDateLabel(offsetDays: number) {
+  if (offsetDays === 0) return "今天";
+  if (offsetDays === 1) return "昨天";
+  return `${offsetDays} 天前`;
+}
+
 export default function Home() {
   const [data, setData] = useState<BootstrapData | null>(null);
   const [view, setView] = useState<View>("dashboard");
   const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [selectedDateKey, setSelectedDateKey] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [memberName, setMemberName] = useState("");
   const [taskForm, setTaskForm] = useState<TaskForm>(emptyTask());
@@ -98,19 +105,26 @@ export default function Home() {
   const selectedMember = data?.members.find((member) => member.id === selectedMemberId) ?? null;
   const selectedStats = selectedMember ? data?.stats[selectedMember.id] : null;
   const memberTasks = useMemo(() => data?.tasks.filter((task) => task.member_id === selectedMemberId) ?? [], [data?.tasks, selectedMemberId]);
-  const todayCompletedIds = useMemo(() => {
+  const selectedCompletedIds = useMemo(() => {
     if (!selectedStats) return new Set<string>();
     return new Set(
       data?.completions
-        .filter((item) => item.member_id === selectedMemberId && item.date_key === selectedStats.today_date_key)
+        .filter((item) => item.member_id === selectedMemberId && item.date_key === (selectedDateKey || selectedStats.today_date_key))
         .map((item) => item.task_id) ?? []
     );
-  }, [data?.completions, selectedMemberId, selectedStats]);
+  }, [data?.completions, selectedDateKey, selectedMemberId, selectedStats]);
   const pendingRedemptions = data?.redemptions.filter((redemption) => redemption.status === "pending") ?? [];
   const topMember = useMemo(() => data?.members.reduce<Member | null>((top, member) => (!top || member.points > top.points ? member : top), null) ?? null, [data?.members]);
 
+  useEffect(() => {
+    if (!selectedStats) return;
+    const dateIsAvailable = selectedStats.checkin_dates.some((item) => item.date_key === selectedDateKey);
+    if (!dateIsAvailable) setSelectedDateKey(selectedStats.today_date_key);
+  }, [selectedDateKey, selectedStats]);
+
   function chooseMember(memberId: string) {
     setSelectedMemberId(memberId);
+    setSelectedDateKey("");
     setTaskForm((current) => ({ ...current, memberId }));
     window.localStorage.setItem("couple-points-member", memberId);
   }
@@ -178,21 +192,24 @@ export default function Home() {
     await run(async () => {
       const result = await api<{ alreadyCompleted?: boolean }>(`/api/tasks/${task.id}/complete`, {
         method: "POST",
-        body: JSON.stringify({ memberId: selectedMemberId })
+        body: JSON.stringify({
+          memberId: selectedMemberId,
+          dateKey: task.cycle === "daily" ? selectedDateKey || selectedStats?.today_date_key : undefined
+        })
       });
-      if (result.alreadyCompleted) setMessage("今天已经完成过这个任务");
-    }, "完成得分");
+      if (result.alreadyCompleted) setMessage("这一天已经完成过这个任务");
+    }, selectedDateKey === selectedStats?.today_date_key ? "今日打卡成功" : "补打卡成功");
   }
 
-  async function settleYesterday() {
+  async function settleEligibleDate() {
     if (!selectedMemberId) return setError("请先选择当前成员。");
     await run(async () => {
       const result = await api<DailySettlementResult>("/api/settlements/daily", {
         method: "POST",
-        body: JSON.stringify({ memberId: selectedMemberId })
+        body: JSON.stringify({ memberId: selectedMemberId, dateKey: selectedStats?.settlement_date_key })
       });
       setSettlement(result);
-    }, "昨日已结算");
+    }, "到期日期已结算");
   }
 
   async function redeemReward(rewardId: string) {
@@ -292,24 +309,38 @@ export default function Home() {
             <div>
               <p className="eyebrow">今日圆环</p>
               <h2>{selectedMember?.name ?? "选择成员"}</h2>
-              <p className="muted">每日任务每天只能完成一次；昨日未完成可手动结算扣分。</p>
+              <p className="muted">今天及前三天都可以补打卡；保护期结束后才会开放扣分结算。</p>
             </div>
             <ProgressRing rate={selectedStats?.today_rate ?? 0} completed={selectedStats?.today_completed ?? 0} total={selectedStats?.today_total ?? 0} />
             <div className="hero-stats">
               <Metric icon={<Trophy size={18} />} label="当前积分" value={selectedMember?.points ?? 0} />
               <Metric icon={<Flame size={18} />} label="连续完成" value={`${selectedStats?.streak_days ?? 0} 天`} />
-              <Metric icon={<MinusCircle size={18} />} label="昨日结算" value={selectedStats?.yesterday_settled ? "已完成" : "待结算"} />
+              <Metric icon={<MinusCircle size={18} />} label="可结算日期" value={selectedStats ? shortDate(selectedStats.settlement_date_key) : "--"} />
             </div>
-            <button className="button primary wide" disabled={busy || !selectedMember || selectedStats?.yesterday_settled} onClick={settleYesterday}>
-              <MinusCircle size={16} />结算昨日未完成
+            <button className="button primary wide" disabled={busy || !selectedMember || selectedStats?.settlement_date_settled} onClick={settleEligibleDate}>
+              <MinusCircle size={16} />{selectedStats?.settlement_date_settled ? "该日期已结算" : `结算 ${selectedStats ? shortDate(selectedStats.settlement_date_key) : "到期日期"}`}
             </button>
           </section>
 
           <section className="glass section">
-            <div className="section-head"><h2>今日任务</h2><span className="badge blue">{memberTasks.filter((task) => task.cycle === "daily" && task.is_active).length} 项</span></div>
+            <div className="section-head"><h2>{selectedDateKey === selectedStats?.today_date_key ? "今日任务" : `${shortDate(selectedDateKey)} 补打卡`}</h2><span className="badge blue">近 3 天可补</span></div>
+            <div className="date-switcher" aria-label="选择打卡日期">
+              {selectedStats?.checkin_dates.map((item) => (
+                <button
+                  key={item.date_key}
+                  type="button"
+                  className={`date-option ${selectedDateKey === item.date_key ? "active" : ""}`}
+                  onClick={() => setSelectedDateKey(item.date_key)}
+                >
+                  <span>{checkinDateLabel(item.offset_days)}</span>
+                  <strong>{item.completed}/{item.total}</strong>
+                  <small>{shortDate(item.date_key)}</small>
+                </button>
+              ))}
+            </div>
             <div className="item-list">
               {memberTasks.filter((task) => task.is_active && task.cycle === "daily").map((task) => (
-                <TaskCard key={task.id} task={task} completed={todayCompletedIds.has(task.id)} onComplete={completeTask} onEdit={editTask} />
+                <TaskCard key={task.id} task={task} completed={selectedCompletedIds.has(task.id)} onComplete={completeTask} onEdit={editTask} />
               ))}
               {memberTasks.filter((task) => task.is_active && task.cycle === "daily").length === 0 && <div className="empty">还没有每日任务</div>}
             </div>
@@ -338,7 +369,7 @@ export default function Home() {
           <section className="glass section">
             <div className="section-head"><h2>{selectedMember?.name ?? "成员"} 的任务库</h2><span className="badge">{memberTasks.length} 项</span></div>
             <div className="item-list">
-              {memberTasks.map((task) => <TaskCard key={task.id} task={task} completed={todayCompletedIds.has(task.id)} onComplete={completeTask} onEdit={editTask} onToggle={(next) => run(() => api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ is_active: next }) }), next ? "任务已启用" : "任务已停用")} />)}
+              {memberTasks.map((task) => <TaskCard key={task.id} task={task} completed={task.cycle === "daily" && selectedCompletedIds.has(task.id)} onComplete={completeTask} onEdit={editTask} onToggle={(next) => run(() => api(`/api/tasks/${task.id}`, { method: "PATCH", body: JSON.stringify({ is_active: next }) }), next ? "任务已启用" : "任务已停用")} />)}
               {memberTasks.length === 0 && <div className="empty">这个成员还没有任务</div>}
             </div>
           </section>
@@ -434,5 +465,5 @@ function EventList({ data }: { data: BootstrapData }) {
 }
 
 function SettlementModal({ result, onClose }: { result: DailySettlementResult; onClose: () => void }) {
-  return <div className="modal-backdrop"><div className="glass modal"><button className="icon-button modal-close" onClick={onClose}><X size={16} /></button><div className="modal-icon"><MinusCircle size={24} /></div><h2>昨日结算完成</h2><p className="muted">共扣除 {result.settlement.penalty_total} 分，已记录到积分事件。</p><div className="settlement-grid"><div><h3>已完成</h3>{result.completed.length ? result.completed.map((task) => <p key={task.id}><Check size={14} />{task.title}</p>) : <p className="muted">无</p>}</div><div><h3>未完成</h3>{result.missed.length ? result.missed.map((task) => <p key={task.id}><ChevronRight size={14} />{task.title} -{task.penalty_points}</p>) : <p className="muted">无</p>}</div></div><button className="button primary wide" onClick={onClose}>知道了</button></div></div>;
+  return <div className="modal-backdrop"><div className="glass modal"><button className="icon-button modal-close" onClick={onClose}><X size={16} /></button><div className="modal-icon"><MinusCircle size={24} /></div><h2>{shortDate(result.settlement.date_key)} 结算完成</h2><p className="muted">共扣除 {result.settlement.penalty_total} 分，已记录到积分事件。</p><div className="settlement-grid"><div><h3>已完成</h3>{result.completed.length ? result.completed.map((task) => <p key={task.id}><Check size={14} />{task.title}</p>) : <p className="muted">无</p>}</div><div><h3>未完成</h3>{result.missed.length ? result.missed.map((task) => <p key={task.id}><ChevronRight size={14} />{task.title} -{task.penalty_points}</p>) : <p className="muted">无</p>}</div></div><button className="button primary wide" onClick={onClose}>知道了</button></div></div>;
 }
