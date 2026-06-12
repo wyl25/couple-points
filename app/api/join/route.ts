@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { jsonError, SESSION_COOKIE } from "@/lib/api";
 import { hashInvite, signSession } from "@/lib/session";
-import { ensureCloudBaseCollections, ensureCloudBaseSpace, findSpaceByInviteHash } from "@/lib/store";
+import { ensureDefaultSpace, ensureStorageCollections, findSpaceByInviteHash } from "@/lib/store";
 
 export async function POST(request: Request) {
   const body = await request.json().catch(() => ({}));
@@ -12,8 +12,8 @@ export async function POST(request: Request) {
   const inviteHash = hashInvite(inviteCode);
   const defaultInviteCode = process.env.INVITE_CODE || "love-0525";
   if (inviteCode === defaultInviteCode) {
-    await ensureCloudBaseCollections();
-    await ensureCloudBaseSpace({
+    await ensureStorageCollections();
+    await ensureDefaultSpace({
       name: process.env.SPACE_NAME || "我们的积分空间",
       invite_hash: inviteHash
     });

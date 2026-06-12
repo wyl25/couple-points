@@ -1,65 +1,81 @@
 # Couple Points
 
-国内可访问版情侣/小团队积分系统。前端使用 Next.js，后端 API 使用腾讯云 CloudBase 云数据库。
+情侣或小团队共享积分系统。Next.js 部署在 EdgeOne Pages，数据使用 EdgeOne Pages Blob，不依赖 CloudBase。
 
 ## 功能
 
-- 成员独立任务库：每个任务只属于一个成员。
-- Apple Health 风格首页：今日完成圆环、连续完成天数、7 天积分趋势。
-- 每日任务每天最多完成一次，重复点击不会重复加分。
-- 每日任务支持自定义未完成扣分。
-- 手动结算昨日：检查昨日未完成每日任务并扣分，且同一天不会重复结算。
-- 积分事件流水：任务加分、每日扣分、奖励兑换扣分都有记录。
-- 奖励兑换仍采用提交后确认的流程。
+- 每位成员拥有独立任务库。
+- 每日任务支持完成加分和未完成扣分。
+- 今天及前三天可补打卡，第四天后才能结算扣分。
+- 奖励自定义、兑换申请、确认后扣分。
+- 积分事件、完成记录和结算记录可追溯。
+- 手机浏览器和桌面浏览器均可使用。
 
-## 本地开发
+## 本地检查
 
 ```bash
 npm install
-npm run dev
+npm run typecheck
+npm run lint
+npm run build
 ```
 
-默认邀请码：
+Blob SDK 需要 EdgeOne Pages Functions 运行环境。本地构建可以正常完成，但涉及数据的 API 应在线上环境验证。
 
-```text
-
-```
-
-## CloudBase 配置
-
-在腾讯云 CloudBase/云开发中新建环境后，复制 `.env.example` 为 `.env.local`，填写：
+## EdgeOne 环境变量
 
 ```env
-DB_PROVIDER=cloudbase
-CLOUDBASE_ENV_ID=你的云开发环境 ID
-CLOUDBASE_DATABASE=
-TENCENT_SECRET_ID=你的腾讯云 SecretId
-TENCENT_SECRET_KEY=你的腾讯云 SecretKey
+DB_PROVIDER=edgeone-blob
+EDGEONE_BLOB_STORE=couple-points-data
+INVITE_CODE=love-0525
 INVITE_HASH_SECRET=一段长随机字符串
 SESSION_SECRET=另一段长随机字符串
+MIGRATION_SECRET=仅用于首次导入的长随机字符串
 ```
 
-如果代码部署在 CloudBase 环境内，通常可以不填 `TENCENT_SECRET_ID` 和 `TENCENT_SECRET_KEY`；本地执行初始化脚本时需要填写。
+部署并完成数据导入后，可以删除 `MIGRATION_SECRET`，导入接口将自动失效。
 
-初始化数据库集合和默认空间：
+## 从 CloudBase 迁移
+
+1. 在 CloudBase 文档型数据库中将以下集合分别导出为 JSON：
+
+```text
+couple_points_spaces
+couple_points_members
+couple_points_tasks
+couple_points_task_completions
+couple_points_rewards
+couple_points_reward_redemptions
+couple_points_point_events
+couple_points_daily_settlements
+```
+
+2. 将导出的 JSON 放进同一个目录，例如 `cloudbase-export`。
+
+3. 生成统一迁移文件：
 
 ```bash
-npm run seed:cloudbase
+npm run migration:payload -- cloudbase-export edgeone-migration.json
 ```
 
-脚本会创建这些集合：
+4. 部署完成后导入：
 
-- `couple_points_spaces`
-- `couple_points_members`
-- `couple_points_tasks`
-- `couple_points_task_completions`
-- `couple_points_rewards`
-- `couple_points_reward_redemptions`
-- `couple_points_point_events`
-- `couple_points_daily_settlements`
+```bash
+curl -X POST "https://你的域名/api/admin/import" \
+  -H "Content-Type: application/json" \
+  -H "x-migration-secret: 你的MIGRATION_SECRET" \
+  --data-binary "@edgeone-migration.json"
+```
 
-## 部署
+5. 查询导入后的集合数量：
 
-推荐部署到腾讯云 CloudBase 支持 Next.js 的 Web/应用托管服务。环境变量与 `.env.local` 保持一致。
+```bash
+curl "https://你的域名/api/admin/import" \
+  -H "x-migration-secret: 你的MIGRATION_SECRET"
+```
 
-部署完成后，把线上网址和邀请码 `love-0525` 分享给对方即可。
+确认成员、积分、任务和历史记录完整后，从 EdgeOne 删除 `MIGRATION_SECRET`、`CLOUDBASE_APIKEY` 和 `CLOUDBASE_ENV_ID`。
+
+## 存储说明
+
+每个逻辑集合保存为 Blob Store `couple-points-data` 中的独立 JSON 文件。所有读取使用强一致模式，避免完成任务后仍看到旧积分。该架构适合成员数量较少的私人共享积分空间。

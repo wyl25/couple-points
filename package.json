@@ -8,10 +8,10 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "seed:cloudbase": "node scripts/cloudbase-seed.mjs"
+    "migration:payload": "node scripts/build-migration-payload.mjs"
   },
   "dependencies": {
-    "@cloudbase/node-sdk": "^3.18.1",
+    "@edgeone/pages-blob": "^0.0.12",
     "lucide-react": "^0.468.0",
     "next": "^14.2.15",
     "react": "^18.3.1",

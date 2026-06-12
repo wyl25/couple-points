@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import tcb from "@cloudbase/node-sdk";
+import { getStore } from "@edgeone/pages-blob";
 import type {
   Cycle,
   DailySettlement,
@@ -33,12 +33,8 @@ const names = {
 
 const dayMs = 24 * 60 * 60 * 1000;
 const retroactiveDays = 3;
-
-function requireEnv(name: string) {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing environment variable: ${name}`);
-  return value;
-}
+const blobStoreName = process.env.EDGEONE_BLOB_STORE || "couple-points-data";
+const collectionQueues = new Map<string, Promise<unknown>>();
 
 function now() {
   return new Date().toISOString();
@@ -73,20 +69,44 @@ function withId<T>(data: T & { _id?: string; id?: string }) {
   return { ...rest, id: data.id ?? _id } as T & { id: string };
 }
 
-function getDb() {
-  const env = requireEnv("CLOUDBASE_ENV_ID");
-  const secretId = process.env.TENCENT_SECRET_ID;
-  const secretKey = process.env.TENCENT_SECRET_KEY;
-  const app = tcb.init({
-    env,
-    ...(secretId && secretKey ? { secretId, secretKey } : {})
+function collectionKey(collectionName: string) {
+  return `collections/${collectionName}.json`;
+}
+
+function blobStore() {
+  return getStore(blobStoreName);
+}
+
+async function readCollection<T>(collectionName: string) {
+  const data = await blobStore().get(collectionKey(collectionName), { type: "json", consistency: "strong" });
+  if (!data) return [];
+  if (!Array.isArray(data)) throw new Error(`存储集合 ${collectionName} 的格式不正确。`);
+  return data.map((item) => withId(item as T & { _id?: string; id?: string }));
+}
+
+async function writeCollection<T>(collectionName: string, records: T[]) {
+  await blobStore().setJSON(collectionKey(collectionName), records, { cacheControl: "no-store" });
+}
+
+async function mutateCollection<T>(collectionName: string, mutate: (records: T[]) => T[] | Promise<T[]>) {
+  const previous = collectionQueues.get(collectionName) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    const records = await readCollection<T>(collectionName);
+    const updated = await mutate(records);
+    await writeCollection(collectionName, updated);
+    return updated;
   });
-  return app.database(process.env.CLOUDBASE_DATABASE ? { database: process.env.CLOUDBASE_DATABASE } : {});
+  collectionQueues.set(collectionName, next.catch(() => undefined));
+  return next;
+}
+
+function matchesWhere(item: Record<string, unknown>, where: Record<string, unknown>) {
+  return Object.entries(where).every(([key, value]) => item[key] === value);
 }
 
 async function getAll<T>(collectionName: string, where: Record<string, unknown> = {}) {
-  const result = await getDb().collection(collectionName).where(where).limit(1000).get();
-  return (result.data ?? []).map((item) => withId(item as T & { _id?: string; id?: string }));
+  const records = await readCollection<T>(collectionName);
+  return records.filter((item) => matchesWhere(item as Record<string, unknown>, where));
 }
 
 async function getOne<T>(collectionName: string, where: Record<string, unknown>) {
@@ -95,27 +115,76 @@ async function getOne<T>(collectionName: string, where: Record<string, unknown>)
 }
 
 async function setDoc<T extends { id: string }>(collectionName: string, data: T) {
-  await getDb().collection(collectionName).doc(data.id).set(data);
+  await mutateCollection<T>(collectionName, (records) => {
+    const index = records.findIndex((item) => (item as T & { id: string }).id === data.id);
+    if (index === -1) return [...records, data];
+    const next = [...records];
+    next[index] = data;
+    return next;
+  });
   return data;
 }
 
-export async function ensureCloudBaseCollections() {
-  const db = getDb();
-  await Promise.all(
-    Object.values(names).map(async (collectionName) => {
-      try {
-        await db.createCollection(collectionName);
-      } catch {
-        // CloudBase throws when the collection already exists.
-      }
-    })
-  );
+export async function ensureStorageCollections() {
+  // Blob collections are created lazily on their first write.
+}
+
+export async function importDataSnapshot(snapshot: Record<string, unknown>) {
+  const aliases: Record<string, string> = {
+    spaces: names.spaces,
+    members: names.members,
+    tasks: names.tasks,
+    completions: names.completions,
+    task_completions: names.completions,
+    rewards: names.rewards,
+    redemptions: names.redemptions,
+    reward_redemptions: names.redemptions,
+    point_events: names.pointEvents,
+    settlements: names.settlements,
+    daily_settlements: names.settlements
+  };
+  const allowed = new Set(Object.values(names));
+  const imported: Record<string, number> = {};
+
+  for (const [inputName, value] of Object.entries(snapshot)) {
+    const collectionName = aliases[inputName] ?? inputName;
+    if (!allowed.has(collectionName)) continue;
+    const records = Array.isArray(value)
+      ? value
+      : value && typeof value === "object" && Array.isArray((value as { data?: unknown }).data)
+        ? (value as { data: unknown[] }).data
+        : null;
+    if (!records) throw new Error(`集合 ${inputName} 不是数组格式。`);
+    const normalized = records.map((item) => {
+      if (!item || typeof item !== "object") throw new Error(`集合 ${inputName} 包含无效记录。`);
+      return withId(item as { _id?: string; id?: string });
+    });
+    if (normalized.some((item) => !item.id)) throw new Error(`集合 ${inputName} 存在缺少 id 的记录。`);
+    await writeCollection(collectionName, normalized);
+    imported[collectionName] = normalized.length;
+  }
+
+  if (Object.keys(imported).length === 0) throw new Error("没有找到可导入的积分系统集合。");
+  return imported;
+}
+
+export async function getStorageSummary() {
+  const entries = await Promise.all(Object.values(names).map(async (collectionName) => [
+    collectionName,
+    (await readCollection(collectionName)).length
+  ] as const));
+  return Object.fromEntries(entries);
 }
 
 async function updateDoc<T>(collectionName: string, id: string, updates: Partial<T>) {
-  await getDb().collection(collectionName).doc(id).update(updates);
-  const updated = await getDb().collection(collectionName).doc(id).get();
-  return withId((updated.data?.[0] ?? { id, ...updates }) as T & { _id?: string; id?: string });
+  let updated: T | null = null;
+  await mutateCollection<T>(collectionName, (records) => records.map((item) => {
+    if ((item as T & { id?: string }).id !== id) return item;
+    updated = { ...item, ...updates };
+    return updated;
+  }));
+  if (!updated) throw new Error("要更新的数据不存在。");
+  return updated;
 }
 
 async function addPointEvent(input: {
@@ -525,7 +594,7 @@ export async function rejectRedemption(spaceId: string, redemptionId: string, re
   } as Partial<RewardRedemption>);
 }
 
-export async function ensureCloudBaseSpace(input: { name: string; invite_hash: string }) {
+export async function ensureDefaultSpace(input: { name: string; invite_hash: string }) {
   const existing = await getOne<Space>(names.spaces, { invite_hash: input.invite_hash });
   if (existing) return existing;
   return setDoc<Space & { invite_hash: string }>(names.spaces, {
